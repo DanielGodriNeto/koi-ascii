@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Carpas ASCII</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b1d2a;color:#d8e6ef;font:14px system-ui,sans-serif}
+  body{display:flex;flex-direction:column}
+  #bar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:10px 16px;background:#13293a}
+  #bar label{display:flex;align-items:center;gap:6px}
+  #bar input[type=color]{width:34px;height:26px;border:0;padding:0;background:none}
+  #bar select,#bar button{background:#1d3a52;color:inherit;border:1px solid #2c5272;border-radius:4px;padding:4px 8px}
+  #bar button{cursor:pointer}
+  #stage{flex:1;min-height:0;position:relative}
+  canvas{position:absolute;inset:0;cursor:crosshair}
+</style>
+</head>
+<body>
+<div id="bar">
+  <label>Padrão <select id="preset"></select></label>
+  <label>Corpo <input type="color" id="cBody"></label>
+  <label>Manchas <input type="color" id="cSpot"></label>
+  <label>Fundo <input type="color" id="cBg"></label>
+  <label>Carpas <input type="range" id="count" min="1" max="30" step="1" value="12"></label>
+  <label>Zoom <input type="range" id="zoom" min="0.5" max="1.5" step="0.1" value="1"></label>
+  <label>Velocidade <input type="range" id="speed" min="0.3" max="2" step="0.1" value="1"></label>
+  <label>Ondas <input type="range" id="ripple" min="0" max="2" step="0.1" value="0.5"></label>
+  <label>Clique <select id="mode"><option value="food">Jogar comida</option><option value="scare">Assustar</option></select></label>
+  <label>Espaço <input type="range" id="space" min="0.5" max="2" step="0.1" value="1"></label>
+  <label><input type="checkbox" id="personal" checked> Espaço pessoal</label>
+  <label><input type="checkbox" id="queue" checked> Fila na comida</label>
+  <label><input type="checkbox" id="smooth" checked> Movimento suave</label>
+  <label><input type="checkbox" id="cozy" checked> Aconchego</label>
+  <label><input type="checkbox" id="petals" checked> Pétalas</label>
+  <label><input type="checkbox" id="school" checked> Cardumes</label>
+  <label><input type="checkbox" id="current" checked> Correnteza</label>
+  <label><input type="checkbox" id="glow" checked> Brilho</label>
+  <label>Sombra suave <input type="range" id="shblur" min="0" max="1" step="0.05" value="0.6"></label>
+  <label>TV antiga <input type="range" id="crt" min="0" max="1" step="0.05" value="0.5"></label>
+  <label><input type="checkbox" id="rain"> Chuva</label>
+  <label><input type="checkbox" id="critter" checked> Sapo e libélula</label>
+  <label><input type="checkbox" id="daynight" checked> Dia e noite</label>
+  <label><input type="checkbox" id="sound"> Som</label>
+  <label><input type="checkbox" id="dots"> Mostrar pontos</label>
+  <button id="copy">Copiar ASCII</button>
+  <button id="shot">Salvar imagem</button>
+  <button id="share">Copiar link</button>
+</div>
+<div id="stage"><canvas id="cv"></canvas></div>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const bodyC = document.createElement('canvas'), shadowC = document.createElement('canvas');
+const bo = bodyC.getContext('2d', { willReadFrequently: true }), so = shadowC.getContext('2d', { willReadFrequently: true });
+let o = bo;                                       // contexto de desenho atual (corpo ou sombra)
+
+const PRESETS = {
+  'Kohaku (branca e vermelha)': ['#f4efe6', '#e8412c', '#0b1d2a'],
+  'Ogon (dourada)':             ['#f2c14e', '#fff2b8', '#0b1d2a'],
+  'Showa (escura e laranja)':   ['#2b2b33', '#ff7a1a', '#cfe3ee'],
+  'Neon azul':                  ['#38d9ff', '#ff4fd8', '#06101a'],
+  'Jade':                       ['#7be0a5', '#f7f3c6', '#0a1f1a'],
+};
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const pre = $('preset');
+Object.keys(PRESETS).forEach(k => pre.add(new Option(k)));
+function applyPreset() {
+  const [b, s, g] = PRESETS[pre.value];
+  $('cBody').value = b; $('cSpot').value = s; $('cBg').value = g;
+}
+pre.onchange = applyPreset; applyPreset();
+try {                                             // lembra as configurações entre sessões
+  const shared = location.hash.startsWith('#s=') ? JSON.parse(atob(location.hash.slice(3))) : {};   // link compartilhado vence o salvo
+  const saved = { ...JSON.parse(localStorage.getItem('koi-settings') || '{}'), ...shared };
+  for (const id in saved) { const el = document.getElementById(id); if (el) el[el.type === 'checkbox' ? 'checked' : 'value'] = saved[id]; }
+} catch (e) {}
+const saveSettings = e => {
+  if (!e.target.id || !/^(INPUT|SELECT)$/.test(e.target.tagName)) return;
+  try {
+    const o = JSON.parse(localStorage.getItem('koi-settings') || '{}');
+    o[e.target.id] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    localStorage.setItem('koi-settings', JSON.stringify(o));
+  } catch (e) {}
+};
+document.addEventListener('input', saveSettings); document.addEventListener('change', saveSettings);
+
+const SS = 2, RAMP = ' .:-=+*#%@';
+const N = 14;                                    // pontos do esqueleto
+const RADII = [2.0, 2.9, 3.4, 3.5, 3.3, 2.9, 2.4, 1.9, 1.5, 1.2, .95, .75, .6, .5].map(r => r * 1.2); // para L=3
+const TAU = Math.PI * 2;
+
+let cols, rows, cw, ch, ratio, WH, L0;
+let fish = [], food = [], pads = [], t = 0, lastText = '';
+let Hh, Hp, GH, hAcc = 0;                             // grade de alturas da água (atual e anterior)
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const wrapAng = a => Math.atan2(Math.sin(a), Math.cos(a));
+const minDelta = (a, b, W) => { const d = b - a; return d - Math.round(d / W) * W; }; // menor caminho no mapa que dá a volta
+const mod = (a, n) => ((a % n) + n) % n;
+
+function kick(x, y, a) {                          // impulso na água (grade quadrada, disco suave)
+  a *= +$('ripple').value * clamp(Math.min(cols, GH) / 70, .3, 1);   // mapa pequeno => impulso menor
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const d = Math.hypot(dx, dy); if (d > 2.2) continue;
+    Hh[mod(Math.floor(y) + dy, GH) * cols + mod(Math.floor(x) + dx, cols)] += a * (1 - d / 2.6);
+  }
+}
+function waterStep() {                            // onda 2D, laplaciano de 9 pontos (isotrópico => anel circular)
+  // amortecimento: a onda some antes de atravessar o mapa (menor mapa => some mais rápido), sem eco nas bordas
+  // a vida da onda também depende do slider: menos "Ondas" => some mais rápido
+  const A = 0.45, D = clamp(Math.pow(clamp(Math.pow(0.04, 1 / (Math.min(cols, GH) * 0.7)), 0.9, 0.978), 2.5 - $('ripple').value), 0.8, 0.99);
+  for (let r = 0; r < GH; r++) {
+    const up = mod(r - 1, GH) * cols, dn = mod(r + 1, GH) * cols, rr = r * cols;
+    for (let c = 0; c < cols; c++) {
+      const i = rr + c, h = Hh[i], l = mod(c - 1, cols), g = mod(c + 1, cols);
+      const lap = (4 * (Hh[rr + l] + Hh[rr + g] + Hh[up + c] + Hh[dn + c]) + Hh[up + l] + Hh[up + g] + Hh[dn + l] + Hh[dn + g] - 20 * h) / 6;
+      Hp[i] = (2 * h - Hp[i] + A * lap) * D;
+    }
+  }
+  [Hh, Hp] = [Hp, Hh];
+}
+
+function makeFish() {
+  const s = rnd(0.92, 1.0), f = {
+    s, sc: fish.length >> 2, dim: 1,      // mais longe = menor e mais apagada
+    L: L0 * s, th: rnd(0, TAU), ph: rnd(0, 6), bp: rnd(0, 6), wa: 0, scare: 0, flee: 0, tn: 0, burst: 1, bite: 0, hungry: Math.random() < .5, pts: [],
+    spots: Array.from({ length: 4 + (Math.random() * 3 | 0) }, () =>
+      [rnd(1, 10), (Math.random() < .5 ? -1 : 1) * rnd(.1, .5), rnd(1.4, 2.6)]),
+  };
+  const hx = rnd(0, cols), hy = rnd(0, WH);
+  for (let i = 0; i < N; i++) f.pts.push({ x: hx - Math.cos(f.th) * i * f.L, y: hy - Math.sin(f.th) * i * f.L });
+  return f;
+}
+function syncCount() {
+  const n = +$('count').value;
+  while (fish.length < n) fish.push(makeFish());
+  fish.length = n;
+}
+$('count').oninput = syncCount;
+
+function resize() {
+  petals = [];
+  const r = $('stage').getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  cv.style.width = r.width + 'px'; cv.style.height = r.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const FONT = Math.round(14 * $('zoom').value), face = 'px Consolas,"DejaVu Sans Mono",monospace';
+  ctx.font = '14' + face; const cw14 = ctx.measureText('M').width;   // referência: tamanho da carpa não depende do zoom
+  ctx.font = FONT + face; ctx.textBaseline = 'top';
+  cw = ctx.measureText('M').width; ch = FONT;
+  cols = Math.floor(r.width / cw); rows = Math.floor(r.height / ch);
+  ratio = ch / cw; WH = rows * ratio;
+  bodyC.width = shadowC.width = cols * SS; bodyC.height = shadowC.height = rows * SS;
+  GH = Math.max(3, Math.round(WH)); Hh = new Float32Array(cols * GH); Hp = new Float32Array(cols * GH);
+  L0 = Math.max(1, Math.min(r.width, r.height) / cw14 * 0.27 / (N - 1));
+  fish = []; food = []; syncCount();
+  pads = Array.from({ length: Math.max(3, cols / 34 | 0) }, () => ({ x: rnd(0, cols), y: rnd(0, WH), vx: 0, vy: 0, R: rnd(3.5, 6), a: rnd(0, TAU), fl: Math.random() < .4 }));
+}
+addEventListener('resize', resize);
+$('zoom').oninput = resize;
+
+const cur = { x: 0, y: 0, v: 0, on: false, last: -9 };   // cursor: parado atrai, rápido assusta
+cv.addEventListener('pointermove', e => {
+  const r = cv.getBoundingClientRect(), x = (e.clientX - r.left) / cw, y = (e.clientY - r.top) / cw, now = performance.now() / 1000;
+  if (cur.on) { const dt = Math.max(.008, now - cur.last); cur.v += (Math.hypot(x - cur.x, y - cur.y) / dt - cur.v) * .3; }
+  const px = cur.on ? cur.x : x, py = cur.on ? cur.y : y;
+  cur.x = x; cur.y = y; cur.on = true; cur.last = now;
+  if (cur.v > 3) {                                 // dedo na água: esteira contínua (V) em vez de bolinhas soltas
+    const len = Math.hypot(x - px, y - py), n = Math.min(80, Math.ceil(len / .6)), a = clamp(cur.v / 140, .04, .25);
+    for (let i = 1; i <= n; i++) kick(px + (x - px) * i / n, py + (y - py) * i / n, a);
+  }
+});
+cv.addEventListener('pointerleave', () => { cur.on = false; cur.v = 0; });
+cv.addEventListener('click', e => {
+  const r = cv.getBoundingClientRect(), x = (e.clientX - r.left) / cw, y = (e.clientY - r.top) / cw;
+  if ($('mode').value === 'food') {               // comida flutuando na superfície
+    for (let i = 0; i < 3; i++) food.push({ x: x + rnd(-1, 1) * (on('queue') ? 5 : 2), y: y + rnd(-1, 1) * (on('queue') ? 5 : 2), t0: t });
+    kick(x, y, 9); plop(.6);
+    for (const f of fish) {                        // peixes por perto disparam na comida
+      if (Math.hypot(minDelta(f.pts[0].x, x, cols), minDelta(f.pts[0].y, y, WH)) < 45 * L0 && f.scare <= 0) { f.hungry = true; f.full = 0; f.rush = 4; }
+    }
+    return;
+  }
+  kick(x, y, 22); plop(1);                         // susto: onda forte e cardume foge
+  for (const f of fish) {
+    const dx = minDelta(x, f.pts[0].x, cols), dy = minDelta(y, f.pts[0].y, WH), d = Math.hypot(dx, dy) || 1;
+    if (d < 40 * L0) { f.scare = 0.5 + 2 * (1 - d / (40 * L0)); f.flee = Math.atan2(dy, dx); }
+  }
+});
+
+function nearestFood(h) {
+  let best = null, bd = 1e9;
+  for (const p of food) {
+    const d = Math.hypot(minDelta(h.x, p.x, cols), minDelta(h.y, p.y, WH));
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best && { p: best, d: bd };
+}
+
+const on = id => $(id).checked;
+let petals = [];
+function updatePetals(dt) {                       // pétalas caem, pousam e a água as leva
+  if (!on('petals')) { petals = []; return; }
+  if (petals.length < 14 && Math.random() < dt * .5) petals.push({ x: rnd(0, cols), y: rnd(0, WH), z: 1, vx: 0, vy: 0, life: 0 });
+  for (const p of petals) {
+    p.life += dt;
+    if (p.z > 0) { p.z -= dt * .25; p.x = mod(p.x + Math.sin(t * 1.3 + p.y) * dt * 1.5, cols); if (p.z <= 0) kick(p.x, p.y, .12); continue; }
+    const c = mod(Math.floor(p.x), cols), r = mod(Math.floor(p.y), GH), gx = Hh[r * cols + mod(c + 1, cols)] - Hh[r * cols + mod(c - 1, cols)], gy = Hh[mod(r + 1, GH) * cols + c] - Hh[mod(r - 1, GH) * cols + c];
+    p.vx = (p.vx - gx * 14 * dt) * Math.pow(.3, dt); p.vy = (p.vy - gy * 14 * dt) * Math.pow(.3, dt);
+    p.x = mod(p.x + p.vx * dt * 18, cols); p.y = mod(p.y + p.vy * dt * 18, WH);
+  }
+  petals = petals.filter(p => p.life < 45);
+}
+
+// ---- som (WebAudio, sem arquivos): ruído de água + "plop" ----
+let ac = null;
+function startAudio() {
+  if (!on('sound')) { if (ac) ac.suspend(); return; }
+  if (!ac) {
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    const n = ac.sampleRate * 2, buf = ac.createBuffer(1, n, ac.sampleRate), d = buf.getChannelData(0);
+    let b = 0; for (let i = 0; i < n; i++) { b = (b + (Math.random() * 2 - 1) * .04) * .98; d[i] = b * 6; }   // ruído marrom
+    const src = ac.createBufferSource(), lp = ac.createBiquadFilter(), g = ac.createGain(), lfo = ac.createOscillator(), lg = ac.createGain();
+    src.buffer = buf; src.loop = true; lp.type = 'lowpass'; lp.frequency.value = 500; g.gain.value = .12;
+    lfo.frequency.value = .15; lg.gain.value = .05; lfo.connect(lg); lg.connect(g.gain);
+    src.connect(lp); lp.connect(g); g.connect(ac.destination); src.start(); lfo.start();
+  }
+  ac.resume();
+}
+function plop(v = 1) {
+  if (!ac || ac.state !== 'running' || !on('sound')) return;
+  const o = ac.createOscillator(), g = ac.createGain(), n = ac.currentTime;
+  o.frequency.setValueAtTime(380 + Math.random() * 200, n); o.frequency.exponentialRampToValueAtTime(110, n + .14);
+  g.gain.setValueAtTime(.0001, n); g.gain.exponentialRampToValueAtTime(.2 * v, n + .01); g.gain.exponentialRampToValueAtTime(.0001, n + .18);
+  o.connect(g); g.connect(ac.destination); o.start(n); o.stop(n + .2);
+}
+$('sound').addEventListener('change', startAudio);
+addEventListener('pointerdown', () => { if (on('sound')) startAudio(); });   // navegador só libera áudio depois de um gesto
+
+// ---- sapo / libélula na vitória-régia ----
+let cr = null, crWait = 3;
+function updateCritter(dt) {
+  if (!on('critter') || !pads.length) { cr = null; return; }
+  if (!cr) {
+    if ((crWait -= dt) > 0) return;
+    const p = pads[Math.random() * pads.length | 0];
+    cr = { p, st: 0, tm: rnd(5, 10), frog: Math.random() < .6, z: 0, dx: rnd(-.4, .4) * p.R, dy: rnd(-.4, .4) * p.R, dip: false };
+  }
+  cr.tm -= dt;
+  if (cr.st === 0) {                              // parado na folha
+    cr.x = cr.p.x + cr.dx; cr.y = cr.p.y + cr.dy;
+    if (cr.tm <= 0) {
+      const a = rnd(0, TAU), d = rnd(9, 15);
+      cr.st = 1; cr.T = cr.tm = cr.frog ? .8 : 3; cr.x0 = cr.x; cr.y0 = cr.y; cr.x1 = cr.x + Math.cos(a) * d; cr.y1 = cr.y + Math.sin(a) * d;
+    }
+    return;
+  }
+  const u = clamp(1 - cr.tm / cr.T, 0, 1);
+  cr.x = cr.x0 + (cr.x1 - cr.x0) * u; cr.y = cr.y0 + (cr.y1 - cr.y0) * u;
+  cr.z = cr.frog ? Math.sin(u * Math.PI) * 1.2 : Math.abs(Math.sin(u * TAU)) * 1.8;   // sapo salta; libélula quica sobre a água
+  if (!cr.frog && !cr.dip && u > .5) { cr.dip = true; kick(cr.x, cr.y, 1.2); plop(.15); }
+  if (cr.tm <= 0) { if (cr.frog) { kick(cr.x, cr.y, 8); plop(.9); } cr = null; crWait = rnd(10, 20); }
+}
+
+// ---- vagalumes (aparecem de noite) ----
+let flies = [];
+function updateFlies(dt) {
+  if (flies.length !== 22) flies = Array.from({ length: 22 }, () => ({ x: rnd(0, cols), y: rnd(0, WH), a: rnd(0, TAU), ph: rnd(0, 6) }));
+  for (const f of flies) { f.a += rnd(-1, 1) * dt * 3; f.x = mod(f.x + Math.cos(f.a) * dt * 1.5, cols); f.y = mod(f.y + Math.sin(f.a) * dt * 1.5, WH); }
+}
+const sunAt = () => Math.sin((t / 150 + .3) * TAU);   // 1 = meio-dia, -1 = meia-noite; ciclo de 150 s
+
+function assignFood() {                         // cada grão tem um dono (o mais perto que ainda está livre); os outros esperam
+  for (const p of food) {
+    if (p.owner && fish.includes(p.owner) && p.owner.hungry && p.owner.scare <= 0) continue;
+    p.owner = null; let bd = 1e9;
+    for (const f of fish) {
+      if (!f.hungry || f.scare > 0 || food.some(q => q.owner === f)) continue;
+      const d = Math.hypot(minDelta(f.pts[0].x, p.x, cols), minDelta(f.pts[0].y, p.y, WH));
+      if (d < bd && d < 40 * f.L) { bd = d; p.owner = f; }
+    }
+  }
+}
+
+function update(dt) {
+  const school = on('school'), current = on('current'), cz = on('cozy'), smooth = on('smooth'), personal = on('personal'), queue = on('queue');
+  const sm = +$('speed').value * (cz ? .75 : 1), NR = 18 * L0, SR = 10 * L0, PS = +$('space').value;
+  if (Math.random() < dt * (cz ? .25 : .6)) kick(rnd(0, cols), rnd(0, GH), .4);   // gotas no ar, a água nunca fica parada
+  food = food.filter(p => t - p.t0 < 30);
+  if (queue) assignFood();
+  updatePetals(dt);
+  if (on('rain')) for (let n = dt * (6 + cols * GH / 250) + Math.random() | 0; n > 0; n--) { kick(rnd(0, cols), rnd(0, GH), .35); if (Math.random() < .08) plop(.12); }
+  updateCritter(dt); updateFlies(dt);
+  for (const f of fish) {
+    const h = f.pts[0];
+    if (f.full > 0 && (f.full -= dt) <= 0) f.hungry = true;   // depois de comer, fica satisfeita um tempo
+    let pvx = 0, pvy = 0, slow = 1;
+    if (personal) {                               // espaço pessoal: afasta cedo e suave do corpo do vizinho, e alivia se ele está à frente
+      const R = 4 * f.L * PS;
+      for (const g of fish) {
+        if (g === f) continue;
+        let bd = 1e9, bx = 0, by = 0;
+        for (const j of [0, 3, 6, 9, 13]) {
+          const q = g.pts[j], dx = minDelta(h.x, q.x, cols), dy = minDelta(h.y, q.y, WH), d = Math.hypot(dx, dy) || 1e-6;
+          if (d < bd) { bd = d; bx = dx / d; by = dy / d; }
+        }
+        if (bd >= R) continue;
+        const w = (1 - bd / R) ** 2;
+        pvx -= bx * w * 5; pvy -= by * w * 5;
+        if (bx * Math.cos(f.th) + by * Math.sin(f.th) > 0) slow = Math.min(slow, 1 - .6 * w);
+      }
+    }
+    let ax = 0, ay = 0, cx = 0, cy = 0, sx = 0, sy = 0, n = 0, sn = 0, sax = 0, say = 0, scx = 0, scy = 0;
+    for (const g of fish) {                       // regras do cardume (boids)
+      if (g === f) continue;
+      const dx = minDelta(h.x, g.pts[0].x, cols), dy = minDelta(h.y, g.pts[0].y, WH), d = Math.hypot(dx, dy) || 1e-6;
+      if (school && g.sc === f.sc && d < 60 * L0) { sn++; sax += Math.cos(g.th); say += Math.sin(g.th); scx += dx; scy += dy; }   // cardume: grupos de ~4 se procuram de longe
+      else if (d < NR) { n++; ax += Math.cos(g.th); ay += Math.sin(g.th); cx += dx; cy += dy; }
+      if (d < SR) { sx -= dx / d * (1 - d / SR); sy -= dy / d * (1 - d / SR); }
+    }
+    f.wa = clamp(f.wa + rnd(-1, 1) * dt * 2, -.8, .8);
+    let vx = Math.cos(f.th) + Math.cos(f.th + f.wa) * .4, vy = Math.sin(f.th) + Math.sin(f.th + f.wa) * .4;
+    if (n) {
+      const m = Math.hypot(cx, cy) || 1;
+      vx += ax / n * 1.5 + cx / m * .25; vy += ay / n * 1.5 + cy / m * .25;
+    }
+    if (sn) {                                     // segue a direção do bando e volta pro centro dele
+      const m = Math.hypot(scx, scy) || 1, pull = Math.min(1, m / sn / (12 * L0));   // perto do centro: só alinha
+      vx += sax / sn * 2 + scx / m * 4 * pull; vy += say / sn * 2 + scy / m * 4 * pull;
+    }
+    if (cur.on) {                                 // cursor: rápido assusta, parado atrai e a carpa orbita
+      cur.v *= Math.pow(.2, dt);
+      const dx = minDelta(cur.x, h.x, cols), dy = minDelta(cur.y, h.y, WH), d = Math.hypot(dx, dy) || 1;
+      if (cur.v > 50 && d < 14 * L0 && f.scare <= 0) { f.scare = .8; f.flee = Math.atan2(-dy, -dx); }
+      else if (cur.v < 20 && d < 30 * L0 && d > 3 * f.L) { vx += dx / d * 1.6 + dy / d * .9; vy += dy / d * 1.6 - dx / d * .9; }
+    }
+    let chase = null, near = false;
+    if (f.scare <= 0 && f.hungry) {                // fome: vai até o grão (o seu, se há fila; senão o mais próximo)
+      const mine = queue ? food.find(p => p.owner === f) : null;
+      chase = queue ? mine && { p: mine, d: Math.hypot(minDelta(h.x, mine.x, cols), minDelta(h.y, mine.y, WH)) } : nearestFood(h);
+    }
+    if (chase && chase.d < 40 * f.L) {
+      const dx = minDelta(h.x, chase.p.x, cols), dy = minDelta(h.y, chase.p.y, WH), m = chase.d || 1;
+      vx += dx / m * (queue ? 2.5 : 4); vy += dy / m * (queue ? 2.5 : 4);
+      if (!queue) { sx *= .3; sy *= .3; }
+      near = chase.d < 10 * f.L;
+      if (chase.d < 2.2 * f.L) {
+        food.splice(food.indexOf(chase.p), 1); kick(h.x, h.y, 6); f.bite = .6; plop(.7);
+        if (queue) { f.hungry = false; f.full = rnd(6, 12); }
+      }
+    }
+    if (chase && chase.d >= 40 * f.L) chase = null;
+    vx += sx * 3 + pvx; vy += sy * 3 + pvy;
+    if (f.scare > 0) { f.scare -= dt; vx += Math.cos(f.flee) * 5; vy += Math.sin(f.flee) * 5; }
+    if (smooth) {                                 // o desejo muda devagar, não de um frame pro outro
+      if (f.dvx === undefined) { f.dvx = vx; f.dvy = vy; }
+      const k = Math.min(1, dt * 3); f.dvx += (vx - f.dvx) * k; f.dvy += (vy - f.dvy) * k; vx = f.dvx; vy = f.dvy;
+    }
+    const scared = f.scare > 0, d = wrapAng(Math.atan2(vy, vx) - f.th);
+    const turn = (scared ? 2.2 : near ? 2.2 : 0.9) * dt;
+    if (smooth) {                                 // inércia angular: começa e termina a curva suave
+      const w = clamp(d * 2, -turn / dt, turn / dt);
+      f.om = (f.om || 0) + (w - (f.om || 0)) * Math.min(1, dt * 4); f.th += f.om * dt;
+    } else f.th += clamp(d, -turn, turn);
+    f.tn += (clamp(d / .5, -1, 1) - f.tn) * Math.min(1, dt * 4);   // quanto está curvando (para as nadadeiras)
+    f.bp += dt * 1.1; f.bite = Math.max(0, f.bite - dt);          // rajada e planeio
+    f.burst = cz ? 0.4 + 0.6 * Math.max(0, Math.sin(f.bp)) ** 2 : 0.2 + 0.8 * Math.max(0, Math.sin(f.bp)) ** 2;   // bate a cauda e planeia
+    if (f.rush > 0) { f.rush -= dt; if (chase) f.burst = Math.max(f.burst, .85); }
+    let sp = 6 * f.L * f.burst * sm * (scared ? 1.9 : chase ? (f.rush > 0 ? 2 : 1.25) : 1) * (1 - 0.4 * Math.min(1, Math.abs(d)));
+    if (chase && near) sp *= 0.35 + 0.65 * Math.min(1, chase.d / (6 * f.L));
+    if (f.bite > 0) sp *= .4;
+    sp *= slow;
+    if (smooth) { f.sp = f.sp === undefined ? sp : f.sp + (sp - f.sp) * Math.min(1, dt * 3); sp = f.sp; }
+    h.x += Math.cos(f.th) * sp * dt; h.y += Math.sin(f.th) * sp * dt;
+    if (current) {                                // a correnteza das ondas empurra a carpa (e ondas contra o nado a freiam)
+      const c = mod(Math.floor(h.x), cols), r = mod(Math.floor(h.y), GH), gx = Hh[r * cols + mod(c + 1, cols)] - Hh[r * cols + mod(c - 1, cols)], gy = Hh[mod(r + 1, GH) * cols + c] - Hh[mod(r - 1, GH) * cols + c];
+      h.x -= gx * 9 * dt * 6; h.y -= gy * 9 * dt * 6;
+    }
+    const sh = (dx, dy) => f.pts.forEach(p => { p.x += dx; p.y += dy; });   // dá a volta: corpo todo acompanha a cabeça
+    if (h.x < 0) sh(cols, 0); else if (h.x >= cols) sh(-cols, 0);
+    if (h.y < 0) sh(0, WH); else if (h.y >= WH) sh(0, -WH);
+    for (let i = 1; i < N; i++) {                 // cada ponto segue o anterior
+      const a = f.pts[i - 1], p = f.pts[i];
+      const dx = p.x - a.x, dy = p.y - a.y, m = Math.hypot(dx, dy) || 1;
+      p.x = a.x + dx / m * f.L; p.y = a.y + dy / m * f.L;
+    }
+    f.ph += dt * (3 + sp / f.L * 0.5);
+    const tail = f.pts[N - 1]; kick(tail.x, tail.y, 0.05 * sp / f.L / 6 * (f.scare > 0 ? 3 : 1));  // rastro na água
+  }
+  for (let it = 0; it < 2; it++) for (let a = 0; a < fish.length; a++) for (let b = a + 1; b < fish.length; b++) {   // colisão: corpos não se atravessam
+    const f = fish[a], g = fish[b];
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      const p = f.pts[i], q = g.pts[j], dx = minDelta(p.x, q.x, cols), dy = minDelta(p.y, q.y, WH), d = Math.hypot(dx, dy) || 1e-6;
+      const m = (RADII[i] * f.L + RADII[j] * g.L) / 3 * 1.05;
+      if (d >= m) continue;
+      const k = (m - d) / d * 0.5;
+      p.x -= dx * k; p.y -= dy * k; q.x += dx * k; q.y += dy * k;
+    }
+  }
+  for (const p of pads) {                         // vitórias-régias: a água empurra, o atrito segura
+    const c = mod(Math.floor(p.x), cols), r = mod(Math.floor(p.y), GH), gx = Hh[r * cols + mod(c + 1, cols)] - Hh[r * cols + mod(c - 1, cols)], gy = Hh[mod(r + 1, GH) * cols + c] - Hh[mod(r - 1, GH) * cols + c];
+    p.vx = (p.vx - gx * 14 * dt + Math.cos(p.a) * .02 * dt) * Math.pow(.25, dt); p.vy = (p.vy - gy * 14 * dt + Math.sin(p.a) * .02 * dt) * Math.pow(.25, dt);
+    p.x = mod(p.x + p.vx * dt * 60 * .3, cols); p.y = mod(p.y + p.vy * dt * 60 * .3, WH);
+    for (const f of fish) { const h = f.pts[0], dx = minDelta(h.x, p.x, cols), dy = minDelta(h.y, p.y, WH), d = Math.hypot(dx, dy);
+      if (d < p.R + f.L) { p.vx += dx / (d || 1) * .08; p.vy += dy / (d || 1) * .08; } }   // a carpa esbarra e a folha balança
+  }
+  hAcc += dt * 60; while (hAcc >= 1) { waterStep(); hAcc--; }
+}
+
+function spinePoints(f) {                         // esqueleto + ondulação lateral
+  return f.pts.map((p, i) => {
+    const a = f.pts[Math.max(0, i - 1)], b = f.pts[Math.min(N - 1, i + 1)];
+    const ang = Math.atan2(b.y - a.y, b.x - a.x), amp = f.L * 0.7 * (0.1 + Math.pow(i / (N - 1), 1.5));
+    const s = amp * (0.35 + 0.65 * f.burst) * Math.sin(f.ph - i * 0.55);
+    return { x: p.x - Math.sin(ang) * s, y: p.y + Math.cos(ang) * s };
+  });
+}
+
+function circles(rp, f, scale, k, col) {               // um único path => sem soma dupla
+  o.beginPath();
+  for (let i = 0; i < N - 1; i++) for (let s = 0; s < 3; s++) {
+    const g = s / 3, x = rp[i].x + (rp[i + 1].x - rp[i].x) * g, y = rp[i].y + (rp[i + 1].y - rp[i].y) * g;
+    const r = (RADII[i] + (RADII[i + 1] - RADII[i]) * g) * f.L / 3 * scale;
+    o.moveTo(x + r, y); o.arc(x, y, r, 0, TAU);
+  }
+  o.fillStyle = col || `rgb(${k * f.dim | 0},0,0)`; o.fill();
+}
+
+function fin(f, x, y, a, len, wid) {
+  o.beginPath(); o.ellipse(x + Math.cos(a) * len / 2, y + Math.sin(a) * len / 2, len / 2, wid / 2, a, 0, TAU);
+  o.fillStyle = `rgb(${105 * f.dim | 0},0,0)`; o.fill();
+}
+
+function drawFish(f, rp) {                        // assume o transform e o 'lighter' já ajustados
+  const k = f.L / 3, brake = Math.max(0, .85 - f.burst);
+  for (const [i, s] of [[2, 1], [2, -1], [6, 1], [6, -1]]) {   // peitorais e pélvicas
+    const a0 = Math.atan2(rp[i - 1].y - rp[i + 1].y, rp[i - 1].x - rp[i + 1].x);
+    const side = i === 2 ? 1 : .6, r = RADII[i] * k;
+    const open = 0.75 + 0.25 * Math.sin(f.ph * 0.7 + s) - 0.45 * f.tn * s + 0.5 * brake;   // dentro da curva fecha, fora abre; freando abre
+    const a = a0 + Math.PI + s * open;
+    fin(f, rp[i].x + Math.cos(a0 + Math.PI / 2) * s * r * .8,
+        rp[i].y + Math.sin(a0 + Math.PI / 2) * s * r * .8, a, 5.5 * k * side, 1.8 * k * side);
+  }
+  const q = rp[N - 1], ta = Math.atan2(q.y - rp[N - 3].y, q.x - rp[N - 3].x) + 0.35 * Math.sin(f.ph - N * .55), T = 8 * k;
+  const P = (da, m) => [q.x + Math.cos(ta + da) * T * m, q.y + Math.sin(ta + da) * T * m];
+  o.beginPath(); o.moveTo(q.x, q.y);              // cauda
+  o.quadraticCurveTo(...P(.15, .7), ...P(.5, 1)); o.lineTo(...P(0, .6)); o.lineTo(...P(-.5, 1));
+  o.quadraticCurveTo(...P(-.15, .7), q.x, q.y);
+  o.fillStyle = `rgb(${105 * f.dim | 0},0,0)`; o.fill();
+  circles(rp, f, 1, 90); circles(rp, f, .7, 90); circles(rp, f, .4, 75);  // corpo com volume
+  o.beginPath();                                  // manchas
+  for (const [i, side, r] of f.spots) {
+    const j = Math.min(N - 2, Math.floor(i)), g = i - j;
+    const x = rp[j].x + (rp[j + 1].x - rp[j].x) * g, y = rp[j].y + (rp[j + 1].y - rp[j].y) * g;
+    const a = Math.atan2(rp[j + 1].y - rp[j].y, rp[j + 1].x - rp[j].x) + Math.PI / 2;
+    const w = RADII[j] * k * side, rr = r * k;
+    o.moveTo(x + Math.cos(a) * w + rr, y + Math.sin(a) * w);
+    o.arc(x + Math.cos(a) * w, y + Math.sin(a) * w, rr, 0, TAU);
+  }
+  o.fillStyle = 'rgb(0,255,0)'; o.fill();
+  let ex = (rp[0].x + rp[1].x) / 2, ey = (rp[0].y + rp[1].y) / 2;
+  if (cur.on) { const dx = minDelta(cur.x, ex, cols), dy = minDelta(cur.y, ey, WH), d = Math.hypot(dx, dy) || 1, m = Math.min(.5, d / 20) * k; ex += dx / d * m; ey += dy / d * m; }   // olhos seguem o cursor   // olhos (canal azul)
+  const ea = Math.atan2(rp[0].y - rp[1].y, rp[0].x - rp[1].x) + Math.PI / 2, ew = RADII[0] * k * .7, er = Math.max(.9, .4 * k);
+  o.beginPath();
+  for (const s of [1, -1]) { const x = ex + Math.cos(ea) * ew * s, y = ey + Math.sin(ea) * ew * s; o.moveTo(x + er, y); o.arc(x, y, er, 0, TAU); }
+  o.fillStyle = 'rgb(0,0,255)'; o.fill();
+}
+
+function offsets(rp, f) {                         // cópias nas bordas, para a carpa aparecer dos dois lados
+  const m = 9 * f.L, xs = rp.map(p => p.x), ys = rp.map(p => p.y);
+  const x0 = Math.min(...xs) - m, x1 = Math.max(...xs) + m, y0 = Math.min(...ys) - m, y1 = Math.max(...ys) + m, out = [];
+  for (const ox of [-cols, 0, cols]) for (const oy of [-WH, 0, WH])
+    if (x1 + ox > 0 && x0 + ox < cols && y1 + oy > 0 && y0 + oy < WH) out.push([ox, oy]);
+  return out;
+}
+
+function drawAll(rps) {
+  for (const [ctx_, shadow] of [[so, true], [bo, false]]) {
+    o = ctx_;
+    o.setTransform(1, 0, 0, 1, 0, 0); o.globalCompositeOperation = 'source-over';
+    o.fillStyle = '#000'; o.fillRect(0, 0, bodyC.width, bodyC.height);
+    o.globalCompositeOperation = 'lighter';
+    fish.map((f, i) => i).sort((p, q) => fish[p].dim - fish[q].dim).forEach(i => {   // longe -> perto
+      const f = fish[i], sx = shadow ? 1.3 * f.s : 0, sy = shadow ? 1.8 * f.s : 0;      // sombra no fundo do lago
+      for (const [ox, oy] of offsets(rps[i], f)) {
+        o.setTransform(SS, 0, 0, SS / ratio, (ox + sx) * SS, (oy + sy) * SS / ratio);
+        if (shadow) { circles(rps[i], f, 1.05, 200); continue; }
+        o.globalCompositeOperation = 'source-over';   // a mais próxima apaga um contorno em volta, separando das de trás
+        circles(rps[i], f, 1.15, 0, '#000');
+        o.globalCompositeOperation = 'lighter';
+        drawFish(f, rps[i]);
+      }
+    });
+  }
+}
+
+let shA = new Float32Array(0);
+const shO = document.createElement('canvas');
+function drawShadows() {                          // mapa de sombra 1px/célula, ampliado com suavização + blur ajustável
+  shO.width = cols; shO.height = rows;
+  const sx = shO.getContext('2d'), img = sx.createImageData(cols, rows);
+  for (let i = 0; i < shA.length; i++) img.data[i * 4 + 3] = shA[i] * 255;
+  sx.putImageData(img, 0, 0);
+  const k = +$('shblur').value, dpr = devicePixelRatio || 1;
+  ctx.save(); ctx.imageSmoothingEnabled = k > 0;
+  if (k > 0) ctx.filter = `blur(${k * 2.5 * cw * dpr}px)`;
+  ctx.drawImage(shO, 0, 0, cols * cw, rows * ch); ctx.restore();
+}
+
+function render(rps) {
+  const bg = hex($('cBg').value), cb = hex($('cBody').value), cs = hex($('cSpot').value);
+  const bgLum = .3 * bg[0] + .6 * bg[1] + .1 * bg[2], cbLum = .3 * cb[0] + .6 * cb[1] + .1 * cb[2];
+  const eyeCol = cbLum > 120 ? '#0a0c14' : '#f2f2f2', wh = [0, 1, 2].map(j => cb[j] + (255 - cb[j]) * .45);
+  ctx.fillStyle = $('cBg').value; ctx.fillRect(0, 0, cv.width, cv.height);
+  const gw = cv.width, gh = cv.height, gg = ctx.createRadialGradient(gw * .5, gh * .45, 0, gw * .5, gh * .5, Math.hypot(gw, gh) * .6);
+  gg.addColorStop(0, 'rgba(255,255,255,.07)'); gg.addColorStop(1, 'rgba(0,0,0,.38)');   // luz no centro, bordas fundas
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = gg; ctx.fillRect(0, 0, gw, gh); ctx.restore();
+  const W = cols * SS, px = bo.getImageData(0, 0, W, rows * SS).data, spx = so.getImageData(0, 0, W, rows * SS).data, n = SS * SS * 255;
+  const cellR = (c, r) => { c = mod(c, cols); r = clamp(r, 0, rows - 1); let a = 0; for (let y = 0; y < SS; y++) for (let x = 0; x < SS; x++) a += px[((r * SS + y) * W + c * SS + x) * 4]; return a; };
+  const lines = [], mix = (a, b, f) => a + (b - a) * f;
+  if (shA.length !== cols * rows) shA = new Float32Array(cols * rows); else shA.fill(0);
+  const shade = (c, r, a) => { const i = r * cols + c; shA[i] = 1 - (1 - shA[i]) * (1 - a); };   // sombras vão p/ um mapa, borrado depois
+  for (let r = 0; r < rows; r++) {
+    let line = '';
+    for (let c = 0; c < cols; c++) {
+      let R = 0, G = 0, B = 0, S = 0;
+      for (let y = 0; y < SS; y++) for (let x = 0; x < SS; x++) {
+        const i = ((r * SS + y) * W + c * SS + x) * 4; R += px[i]; G += px[i + 1]; B += px[i + 2]; S += spx[i];
+      }
+      const BY = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];   // dithering de Bayer quebra as faixas da rampa
+      const lum = Math.max(0, Math.min(1, Math.pow(Math.min(1, R / n * 1.1), 0.75) + (BY[(r & 3) * 4 + (c & 3)] / 16 - .5) * .09));
+      let ch_ = ' ', col;
+      if (lum > 0.05) {
+        ch_ = RAMP[Math.round(lum * (RAMP.length - 1))];
+        if (lum < .7) {                          // borda: o glifo segue a direção do contorno (| - / \)
+          const gx = cellR(c + 1, r) - cellR(c - 1, r), gy = (cellR(c, r + 1) - cellR(c, r - 1)) / ratio, mg = Math.hypot(gx, gy) / n;
+          if (mg > .28) ch_ = ['-', '\\', '|', '/'][Math.round(mod(Math.atan2(gy, gx) + Math.PI / 2, Math.PI) / (Math.PI / 4)) % 4];
+        }
+        const m = Math.min(1, G / n * 1.6), k = Math.min(1, 0.6 + 0.6 * lum);
+        col = [0, 1, 2].map(j => mix(bg[j], mix(cb[j], cs[j], m), k) | 0);
+        if (B / n > .22) { ch_ = '@'; col = hex(eyeCol); }                          // olho
+      } else {
+        const sh = Math.min(1, S / n * 1.2);
+        if (sh > .05) shade(c, r, .4 * sh);
+        const gr = Math.min(GH - 1, Math.floor((r + .5) * ratio)), rU = mod(gr - 1, GH) * cols + c, rD = mod(gr + 1, GH) * cols + c;
+        const gx = Hh[gr * cols + mod(c + 1, cols)] - Hh[gr * cols + mod(c - 1, cols)], gy = Hh[rD] - Hh[rU], mag = Math.hypot(gx, gy);
+        const d = (gx * .5 + gy * .6) * 1.4, up = Math.max(0, d), dn = Math.max(0, -d);   // luz vinda do canto superior esquerdo
+        if (mag > .05 && up > dn * .6) {         // lado iluminado da onda: brilha, caractere pela intensidade
+          const a = Math.min(1, up * 1.3);
+          ch_ = a > .85 ? '*' : a > .6 ? '+' : a > .4 ? '=' : a > .22 ? '-' : ':';
+          col = [0, 1, 2].map(j => mix(bg[j], wh[j], .25 + .75 * a) | 0);
+        } else if (dn > .06) {                   // lado na sombra: escurece o fundo
+          const a = Math.min(1, dn * 1.4);
+          shade(c, r, .45 * a);
+          if (a > .35) { ch_ = '.'; col = bg.map(v => v * .8 | 0); }
+        }
+      }
+      line += ch_;
+      if (ch_ !== ' ') { ctx.fillStyle = `rgb(${col})`; ctx.fillText(ch_, c * cw, r * ch); }
+    }
+    lines.push(line.trimEnd());
+  }
+  lastText = lines.join('\n');
+  drawShadows();
+  ctx.fillStyle = $('cSpot').value;
+  for (const p of food) ctx.fillText(Math.sin(t * 3 + p.x) > 0 ? 'o' : '°', p.x * cw, p.y * cw - ch * .2); // grãos de ração
+  if ($('dots').checked) {                        // esqueletos visíveis
+    ctx.strokeStyle = ctx.fillStyle = $('cSpot').value; ctx.lineWidth = 1.5;
+    fish.forEach((f, i) => {
+      for (const [ox, oy] of offsets(rps[i], f)) {
+        ctx.beginPath(); f.pts.forEach((p, j) => ctx[j ? 'lineTo' : 'moveTo']((p.x + ox) * cw, (p.y + oy) * cw)); ctx.stroke();
+        f.pts.forEach(p => { ctx.beginPath(); ctx.arc((p.x + ox) * cw, (p.y + oy) * cw, 3, 0, TAU); ctx.fill(); });
+      }
+    });
+  }
+  for (const p of pads) for (const ox of [-cols, 0, cols]) for (const oy of [-WH, 0, WH]) {   // folhas na superfície (por cima das carpas)
+    const x0 = Math.floor(p.x + ox - p.R - 1), x1 = Math.ceil(p.x + ox + p.R + 1);
+    for (let c = Math.max(0, x0); c <= Math.min(cols - 1, x1); c++) for (let r = Math.max(0, Math.floor((p.y + oy - p.R) / ratio) - 1); r <= Math.min(rows - 1, Math.ceil((p.y + oy + p.R) / ratio) + 1); r++) {
+      const dx = c + .5 - (p.x + ox), dy = (r + .5) * ratio - (p.y + oy), d = Math.hypot(dx, dy);
+      if (d > p.R) continue;
+      if (Math.abs(wrapAng(Math.atan2(dy, dx) - p.a)) < .22) continue;                  // fenda da folha
+      const rim = d > p.R * .82, vein = Math.sin(Math.atan2(dy, dx) * 5) > .8 && d < p.R * .8;
+      const dark = d / p.R, shade = 1 - .45 * Math.max(0, (dx * .5 + dy * .6) / p.R);
+      ctx.fillStyle = `rgb(${[38 + 20 * (1 - dark), 120 + 40 * (1 - dark), 66].map(v => v * shade | 0)})`;
+      const ctr = p.fl && d < p.R * .3;
+      if (ctr) ctx.fillStyle = '#ff9ad0';
+      ctx.fillText(ctr ? '@' : rim ? '%' : vein ? '|' : dark > .55 ? '#' : '&', c * cw, r * ch);
+    }
+  }
+  if (on('petals')) {                             // pétalas (caindo: maiores e mais claras; na água: pequenas)
+    for (const p of petals) {
+      ctx.fillStyle = `rgba(255,${170 + 40 * p.z | 0},${200 + 30 * p.z | 0},${p.life > 38 ? (45 - p.life) / 7 : 1})`;
+      ctx.fillText(p.z > 0 ? '❀' : '*', p.x * cw, p.y * cw - ch * .2 - p.z * ch * 3);
+    }
+  }
+  if (cr) {
+    ctx.fillStyle = cr.frog ? '#9fe870' : '#7fe9ff';
+    ctx.fillText(cr.frog ? (cr.st ? '(Ö)' : '(ö)') : '-+-', mod(cr.x, cols) * cw - cw * 1.5, mod(cr.y, WH) * cw - ch * .2 - cr.z * ch * 2);
+  }
+  if (on('cozy')) {                               // tom quente de lanterna + luz suave no cursor
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = 'rgba(255,170,90,.22)'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.restore();
+  }
+  if (on('daynight') || on('rain')) {             // amanhecer/entardecer, noite azul, chuva cinza
+    const sun = on('daynight') ? sunAt() : 1, dark = clamp(.15 - sun * 1.5, 0, .75), warm = Math.max(0, 1 - Math.abs(sun) * 3.5);
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (warm > 0) { ctx.globalCompositeOperation = 'soft-light'; ctx.fillStyle = `rgba(255,110,70,${warm * .35})`; ctx.fillRect(0, 0, cv.width, cv.height); }
+    ctx.globalCompositeOperation = 'multiply';
+    if (dark > 0) { ctx.fillStyle = `rgb(${255 - dark * 200 | 0},${255 - dark * 170 | 0},${255 - dark * 80 | 0})`; ctx.fillRect(0, 0, cv.width, cv.height); }
+    if (on('rain')) { ctx.fillStyle = 'rgb(220,229,238)'; ctx.fillRect(0, 0, cv.width, cv.height); }
+    ctx.restore();
+    const fa = clamp((dark - .3) * 3, 0, 1);
+    if (fa > 0) for (const f of flies) { ctx.fillStyle = `rgba(230,255,130,${fa * (.5 + .5 * Math.sin(t * 2.5 + f.ph))})`; ctx.fillText('•', f.x * cw, f.y * cw - ch * .2); }
+  }
+  if ($('glow').checked && bgLum < 110) {         // brilho suave (blur) só em fundo escuro
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'screen';      // bloom em duas escalas: halo apertado + halo largo
+    ctx.filter = 'blur(2px)'; ctx.globalAlpha = .3; ctx.drawImage(cv, 0, 0);
+    ctx.filter = 'blur(14px)'; ctx.globalAlpha = .4; ctx.drawImage(cv, 0, 0); ctx.restore();
+  }
+  crtPass();
+}
+
+const ghostC = document.createElement('canvas');
+function crtPass() {                              // TV de tubo: fantasma do quadro anterior, borrão horizontal (vídeo composto) e linhas de varredura
+  const k = +$('crt').value, gx = ghostC.getContext('2d');
+  if (ghostC.width !== cv.width || ghostC.height !== cv.height) { ghostC.width = cv.width; ghostC.height = cv.height; gx.drawImage(cv, 0, 0); }
+  if (k > 0) {
+    const dpr = devicePixelRatio || 1;
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = `blur(${3 * dpr}px)`; ctx.globalAlpha = .7 * k;
+    ctx.drawImage(cv, 0, 0);                                                      // mistura suave: amolece sombras e bordas
+    ctx.globalAlpha = .3 * k; ctx.drawImage(ghostC, 0, 0);                        // rastro leve do quadro anterior
+    ctx.filter = 'none'; ctx.restore();
+  }
+  gx.globalCompositeOperation = 'copy'; gx.drawImage(cv, 0, 0); gx.globalCompositeOperation = 'source-over';
+}
+
+$('copy').onclick = () => { navigator.clipboard.writeText(lastText); $('copy').textContent = 'Copiado!'; setTimeout(() => $('copy').textContent = 'Copiar ASCII', 1200); };
+
+const flash = (b, txt) => { const old = b.textContent; b.textContent = txt; setTimeout(() => b.textContent = old, 1200); };
+$('shot').onclick = () => cv.toBlob(b => {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'carpas.png'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000); flash($('shot'), 'Salvo!');
+});
+$('share').onclick = () => {                      // link com todas as configurações no #
+  const s = {}; document.querySelectorAll('#bar input[id],#bar select[id]').forEach(e => s[e.id] = e.type === 'checkbox' ? e.checked : e.value);
+  navigator.clipboard.writeText(location.href.split('#')[0] + '#s=' + btoa(JSON.stringify(s))); flash($('share'), 'Link copiado!');
+};
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
+  update(dt);
+  const rps = fish.map(spinePoints);
+  drawAll(rps); render(rps);
+  requestAnimationFrame(frame);
+}
+resize(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
